@@ -1,9 +1,14 @@
 package cz.deathreplay;
 
 import com.destroystokyo.paper.profile.ProfileProperty;
-import cz.deathreplay.Model.Frame;
-import cz.deathreplay.Model.Replay;
-import cz.deathreplay.Model.State;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
@@ -11,6 +16,9 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeInstance;
+import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.AbstractArrow;
 import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.Entity;
@@ -30,29 +38,16 @@ import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.inventory.EntityEquipment;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.metadata.MetadataValue;
+import org.bukkit.scheduler.BukkitTask;
 
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
-
-/**
- * Continuously records a ring buffer of snapshots around every player.
- * When a player dies, the buffer is saved as a {@link Replay}.
- */
 public final class Recorder implements Listener {
     private final DeathReplayPlugin plugin;
     private final ReplayStore store;
-
-    private final Map<UUID, ArrayDeque<Frame>> rings = new HashMap<>();
-    /** Events collected since the last snapshot; cleared after every snapshot. */
+    private final Map<UUID, ArrayDeque<Model.Frame>> rings = new HashMap<>();
     private final Set<UUID> pendingSwing = new HashSet<>();
     private final Set<UUID> pendingHurt = new HashSet<>();
-
+    private final Map<ItemStack, String> encCache = new HashMap<>();
+    private BukkitTask task;
     private int interval;
     private int maxFrames;
     private double radius;
@@ -63,26 +58,28 @@ public final class Recorder implements Listener {
         this.store = store;
     }
 
+    /** Reads the record.* settings and (re)starts the recording timer. Safe to call again on reload. */
     public void start() {
-        var cfg = plugin.getConfig();
+        if (task != null) {
+            task.cancel();
+        }
+        rings.clear();
+        FileConfiguration cfg = plugin.getConfig();
         interval = Math.max(1, cfg.getInt("record.interval-ticks", 2));
         int seconds = Math.max(3, cfg.getInt("record.duration-seconds", 10));
         maxFrames = Math.max(2, seconds * 20 / interval);
-        radius = Math.max(4, cfg.getDouble("record.radius", 24));
+        radius = Math.max(4.0, cfg.getDouble("record.radius", 24.0));
         maxEntities = Math.max(2, cfg.getInt("record.max-entities", 20));
-        plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, interval, interval);
+        task = plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, interval, interval);
     }
-
-    // ---------------------------------------------------------------- recording
 
     private void tick() {
         for (Player p : Bukkit.getOnlinePlayers()) {
             if (p.getGameMode() == GameMode.SPECTATOR || p.isDead()) {
-                // spectators (including admins currently watching a replay) are not recorded
                 rings.remove(p.getUniqueId());
                 continue;
             }
-            ArrayDeque<Frame> ring = rings.computeIfAbsent(p.getUniqueId(), k -> new ArrayDeque<>());
+            ArrayDeque<Model.Frame> ring = rings.computeIfAbsent(p.getUniqueId(), k -> new ArrayDeque<>());
             ring.addLast(capture(p, null));
             while (ring.size() > maxFrames) {
                 ring.removeFirst();
@@ -92,9 +89,9 @@ public final class Recorder implements Listener {
         pendingHurt.clear();
     }
 
-    private Frame capture(Player center, UUID dead) {
-        List<State> list = new ArrayList<>();
-        list.add(stateOf(center, dead)); // the victim is always first
+    private Model.Frame capture(Player center, UUID dead) {
+        ArrayList<Model.State> list = new ArrayList<>();
+        list.add(stateOf(center, dead));
         for (Entity e : center.getNearbyEntities(radius, radius, radius)) {
             if (list.size() >= maxEntities) {
                 break;
@@ -104,7 +101,7 @@ public final class Recorder implements Listener {
             }
             list.add(stateOf(e, dead));
         }
-        return new Frame(list);
+        return new Model.Frame(list);
     }
 
     private boolean tracked(Entity e) {
@@ -121,7 +118,7 @@ public final class Recorder implements Listener {
     }
 
     private static boolean isVanished(Player p) {
-        for (MetadataValue v : p.getMetadata("vanished")) { // convention used by SuperVanish/PremiumVanish/Essentials
+        for (MetadataValue v : p.getMetadata("vanished")) {
             if (v.asBoolean()) {
                 return true;
             }
@@ -129,44 +126,84 @@ public final class Recorder implements Listener {
         return false;
     }
 
-    private State stateOf(Entity e, UUID dead) {
+    private Model.State stateOf(Entity e, UUID dead) {
         UUID id = e.getUniqueId();
         Location l = e.getLocation();
         int flags = 0;
         byte kind = e instanceof Player ? Model.PLAYER : (e instanceof LivingEntity ? Model.MOB : Model.ARROW);
         String name = e instanceof Player pl ? pl.getName() : e.getType().name();
-        String hand = "AIR", helmet = "AIR", chest = "AIR", legs = "AIR", boots = "AIR";
+        String hand = "AIR";
+        String helmet = "AIR";
+        String chest = "AIR";
+        String legs = "AIR";
+        String boots = "AIR";
+        float health = 0f;
+        float maxHealth = 0f;
+        float armor = 0f;
 
         if (e instanceof Player pl) {
-            if (pl.isSneaking()) flags |= Model.SNEAK;
-            if (pl.isSprinting()) flags |= Model.SPRINT;
-        }
-        if (e instanceof LivingEntity le) {
-            if (le.isSwimming()) flags |= Model.SWIM;
-            if (le.isGliding()) flags |= Model.GLIDE;
-            EntityEquipment eq = le.getEquipment();
-            if (eq != null) {
-                hand = mat(eq.getItemInMainHand());
-                helmet = mat(eq.getHelmet());
-                chest = mat(eq.getChestplate());
-                legs = mat(eq.getLeggings());
-                boots = mat(eq.getBoots());
+            if (pl.isSneaking()) {
+                flags |= Model.SNEAK;
+            }
+            if (pl.isSprinting()) {
+                flags |= Model.SPRINT;
             }
         }
-        if (pendingSwing.contains(id)) flags |= Model.SWING;
-        if (pendingHurt.contains(id)) flags |= Model.HURT;
-        if (id.equals(dead)) flags |= Model.DEAD;
-
-        return new State(id, kind, e.getType().name(), name,
+        if (e instanceof LivingEntity le) {
+            if (le.isSwimming()) {
+                flags |= Model.SWIM;
+            }
+            if (le.isGliding()) {
+                flags |= Model.GLIDE;
+            }
+            EntityEquipment eq = le.getEquipment();
+            if (eq != null) {
+                hand = enc(eq.getItemInMainHand());
+                helmet = enc(eq.getHelmet());
+                chest = enc(eq.getChestplate());
+                legs = enc(eq.getLeggings());
+                boots = enc(eq.getBoots());
+            }
+            health = (float) le.getHealth();
+            AttributeInstance maxAttr = le.getAttribute(Attribute.MAX_HEALTH);
+            maxHealth = maxAttr == null ? 0f : (float) maxAttr.getValue();
+            AttributeInstance armorAttr = le.getAttribute(Attribute.ARMOR);
+            armor = armorAttr == null ? 0f : (float) armorAttr.getValue();
+        }
+        if (pendingSwing.contains(id)) {
+            flags |= Model.SWING;
+        }
+        if (pendingHurt.contains(id)) {
+            flags |= Model.HURT;
+        }
+        if (id.equals(dead)) {
+            flags |= Model.DEAD;
+        }
+        return new Model.State(id, kind, e.getType().name(), name,
                 l.getX(), l.getY(), l.getZ(), l.getYaw(), l.getPitch(), flags,
-                hand, helmet, chest, legs, boots);
+                hand, helmet, chest, legs, boots, health, maxHealth, armor);
     }
 
-    private static String mat(ItemStack item) {
-        return item == null ? "AIR" : item.getType().name();
+    /**
+     * Encodes an item as "B64:" + base64 of the serialized ItemStack so the replay can show
+     * the exact item (enchant glint, armor trims, leather dye...). The same String instance is
+     * reused for identical items, so it is stored only once in memory and in the .replay file.
+     */
+    private String enc(ItemStack item) {
+        if (item == null || item.getType().isAir()) {
+            return "AIR";
+        }
+        ItemStack one = item.asOne();
+        String s = encCache.get(one);
+        if (s == null) {
+            if (encCache.size() > 1024) {
+                encCache.clear();
+            }
+            s = "B64:" + Base64.getEncoder().encodeToString(one.serializeAsBytes());
+            encCache.put(one, s);
+        }
+        return s;
     }
-
-    // ---------------------------------------------------------------- events
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onAnimation(PlayerAnimationEvent e) {
@@ -188,7 +225,6 @@ public final class Recorder implements Listener {
         rings.remove(e.getPlayer().getUniqueId());
     }
 
-    /** After a teleport to another world or far away the replay would jump, so the buffer is dropped. */
     @EventHandler(ignoreCancelled = true)
     public void onTeleport(PlayerTeleportEvent e) {
         Location from = e.getFrom();
@@ -201,15 +237,13 @@ public final class Recorder implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onDeath(PlayerDeathEvent e) {
         Player victim = e.getEntity();
-
-        List<Frame> frames = new ArrayList<>();
-        ArrayDeque<Frame> ring = rings.remove(victim.getUniqueId());
+        ArrayList<Model.Frame> frames = new ArrayList<>();
+        ArrayDeque<Model.Frame> ring = rings.remove(victim.getUniqueId());
         if (ring != null) {
             frames.addAll(ring);
         }
-        frames.add(capture(victim, victim.getUniqueId())); // last frame = the moment of death
+        frames.add(capture(victim, victim.getUniqueId()));
 
-        // who killed the player
         Entity killer = null;
         String cause = "UNKNOWN";
         EntityDamageEvent last = victim.getLastDamageCause();
@@ -223,31 +257,36 @@ public final class Recorder implements Listener {
                 killer = d;
             }
         }
-        String killerName = killer == null ? cause
-                : (killer instanceof Player kp ? kp.getName() : killer.getType().name());
+        String killerName;
+        if (killer == null) {
+            killerName = cause;
+        } else if (killer instanceof Player kp) {
+            killerName = kp.getName();
+        } else {
+            killerName = killer.getType().name();
+        }
 
-        // player skins (so the replay still shows their heads after they disconnect)
-        Map<UUID, String> skins = new HashMap<>();
-        for (Frame f : frames) {
-            for (State s : f.states()) {
-                if (s.kind() == Model.PLAYER && !skins.containsKey(s.id())) {
-                    Player p = Bukkit.getPlayer(s.id());
-                    skins.put(s.id(), p == null ? "" : skinOf(p));
+        HashMap<UUID, String> skins = new HashMap<>();
+        for (Model.Frame f : frames) {
+            for (Model.State s : f.states()) {
+                if (s.kind() != Model.PLAYER || skins.containsKey(s.id())) {
+                    continue;
                 }
+                Player p = Bukkit.getPlayer(s.id());
+                skins.put(s.id(), p == null ? "" : skinOf(p));
             }
         }
 
-        Replay r = new Replay(store.newId(), System.currentTimeMillis(), victim.getWorld().getName(),
-                victim.getUniqueId(), victim.getName(),
-                killer == null ? null : killer.getUniqueId(), killerName, cause,
-                interval, frames, skins);
+        Model.Replay r = new Model.Replay(store.newId(), System.currentTimeMillis(),
+                victim.getWorld().getName(), victim.getUniqueId(), victim.getName(),
+                killer == null ? null : killer.getUniqueId(), killerName, cause, interval, frames, skins);
         store.add(r);
 
         if (plugin.getConfig().getBoolean("notify-staff", true)) {
-            Component msg = Component.text("☠ ", NamedTextColor.RED)
+            Component msg = Component.text("\u2620 ", NamedTextColor.RED)
                     .append(Component.text(r.victimName(), NamedTextColor.WHITE))
                     .append(Component.text(" died (" + r.killerName() + ") ", NamedTextColor.GRAY))
-                    .append(Component.text("[▶ Play]", NamedTextColor.GREEN)
+                    .append(Component.text("[\u25b6 Play]", NamedTextColor.GREEN)
                             .clickEvent(ClickEvent.runCommand("/replay play " + r.id()))
                             .hoverEvent(HoverEvent.showText(Component.text("Play replay #" + r.id()))));
             for (Player p : Bukkit.getOnlinePlayers()) {
