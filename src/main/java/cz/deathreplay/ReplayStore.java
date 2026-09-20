@@ -1,7 +1,5 @@
 package cz.deathreplay;
 
-import cz.deathreplay.Model.Replay;
-
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -21,16 +19,14 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
-/** Keeps replays in memory and persists them (gzip) to plugins/DeathReplay/replays/. */
 public final class ReplayStore {
-    /** When loading, only our own classes and basic java.util / java.lang types are allowed. */
     private static final ObjectInputFilter FILTER =
             ObjectInputFilter.Config.createFilter("cz.deathreplay.*;java.util.*;java.lang.*;!*");
     private static final String EXT = ".replay";
 
     private final DeathReplayPlugin plugin;
     private final File dir;
-    private final TreeMap<Integer, Replay> replays = new TreeMap<>();
+    private final TreeMap<Integer, Model.Replay> replays = new TreeMap<>();
     private final ExecutorService io = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "DeathReplay-IO");
         t.setDaemon(true);
@@ -45,7 +41,7 @@ public final class ReplayStore {
 
     public void load() {
         dir.mkdirs();
-        long keepMs = plugin.getConfig().getLong("storage.keep-days", 14) * 86_400_000L;
+        long keepMs = plugin.getConfig().getLong("storage.keep-days", 14L) * 86400000L;
         long cutoff = System.currentTimeMillis() - keepMs;
         File[] files = dir.listFiles((d, n) -> n.endsWith(EXT));
         if (files == null) {
@@ -56,7 +52,7 @@ public final class ReplayStore {
             try (ObjectInputStream in = new ObjectInputStream(
                     new GZIPInputStream(new BufferedInputStream(new FileInputStream(f))))) {
                 in.setObjectInputFilter(FILTER);
-                Replay r = (Replay) in.readObject();
+                Model.Replay r = (Model.Replay) in.readObject();
                 if (r.time() < cutoff) {
                     f.delete();
                     continue;
@@ -69,17 +65,34 @@ public final class ReplayStore {
         trim();
     }
 
+    /** Re-reads all replays from disk (used by /replay reload). Waits for pending saves first. */
+    public void reload() {
+        try {
+            io.submit(() -> { }).get(5L, TimeUnit.SECONDS);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ex) {
+            plugin.getLogger().warning("Timed out waiting for pending replay saves: " + ex);
+        }
+        replays.clear();
+        load();
+    }
+
+    public int size() {
+        return replays.size();
+    }
+
     public int newId() {
         return nextId++;
     }
 
-    public void add(Replay r) {
+    public void add(Model.Replay r) {
         replays.put(r.id(), r);
         trim();
         io.execute(() -> write(r));
     }
 
-    public Replay get(int id) {
+    public Model.Replay get(int id) {
         return replays.get(id);
     }
 
@@ -91,11 +104,10 @@ public final class ReplayStore {
         return true;
     }
 
-    /** Newest replays first, optionally only those of one victim (by name). */
-    public List<Replay> recent(int limit, String victimName) {
-        List<Replay> out = new ArrayList<>();
-        for (Map.Entry<Integer, Replay> e : replays.descendingMap().entrySet()) {
-            Replay r = e.getValue();
+    public List<Model.Replay> recent(int limit, String victimName) {
+        ArrayList<Model.Replay> out = new ArrayList<>();
+        for (Map.Entry<Integer, Model.Replay> e : replays.descendingMap().entrySet()) {
+            Model.Replay r = e.getValue();
             if (victimName != null && !r.victimName().equalsIgnoreCase(victimName)) {
                 continue;
             }
@@ -110,7 +122,7 @@ public final class ReplayStore {
     public void close() {
         io.shutdown();
         try {
-            io.awaitTermination(10, TimeUnit.SECONDS);
+            io.awaitTermination(10L, TimeUnit.SECONDS);
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
         }
@@ -138,7 +150,7 @@ public final class ReplayStore {
         }
     }
 
-    private void write(Replay r) {
+    private void write(Model.Replay r) {
         try (ObjectOutputStream out = new ObjectOutputStream(
                 new GZIPOutputStream(new BufferedOutputStream(new FileOutputStream(file(r.id())))))) {
             out.writeObject(r);
