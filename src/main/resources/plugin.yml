@@ -3,6 +3,7 @@ version: ${project.version}
 main: cz.deathreplay.DeathReplayPlugin
 api-version: '1.21'
 description: Records the last seconds before a player dies and lets admins replay them.
+author: Failxos
 commands:
   replay:
     description: Replay a player's death
