@@ -1,6 +1,12 @@
 package cz.deathreplay;
 
-import cz.deathreplay.Model.Replay;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
@@ -9,31 +15,20 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
-import java.util.UUID;
-
 public final class DeathReplayPlugin extends JavaPlugin implements Listener {
-    /** The only permission of the plugin. Granted to operators by default. */
     public static final String PERM = "deathreplay.use";
 
     private ReplayStore store;
+    private Recorder recorder;
     private final Map<UUID, ReplaySession> sessions = new HashMap<>();
-    /** UUIDs of the fake entities created by playback, so the recorder never records them. */
     private final Set<UUID> fake = new HashSet<>();
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
-
         store = new ReplayStore(this);
         store.load();
-
-        Recorder recorder = new Recorder(this, store);
+        recorder = new Recorder(this, store);
         getServer().getPluginManager().registerEvents(recorder, this);
         getServer().getPluginManager().registerEvents(this, this);
         recorder.start();
@@ -54,11 +49,29 @@ public final class DeathReplayPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    /**
+     * Called by /replay reload. Soft-reloads the whole plugin without restarting the server:
+     * ends running replays, re-reads config.yml, re-reads saved replays from disk
+     * and restarts recording with the new record.* settings.
+     */
+    public void reload() {
+        for (ReplaySession s : new ArrayList<>(sessions.values())) {
+            s.stop();
+        }
+        reloadConfig();
+        store.reload();
+        recorder.start();
+    }
+
+    public int replayCount() {
+        return store.size();
+    }
+
     public ReplaySession session(Player p) {
         return sessions.get(p.getUniqueId());
     }
 
-    public void start(Player p, Replay r) {
+    public void start(Player p, Model.Replay r) {
         stopSession(p);
         ReplaySession s = new ReplaySession(this, p, r);
         sessions.put(p.getUniqueId(), s);
@@ -93,7 +106,6 @@ public final class DeathReplayPlugin extends JavaPlugin implements Listener {
         fake.remove(id);
     }
 
-    /** If an admin leaves in the middle of a replay, their original game mode and location are restored. */
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         stopSession(e.getPlayer());
