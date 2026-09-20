@@ -1,0 +1,18 @@
+# How many seconds before death are recorded and how often a snapshot is taken.
+# interval-ticks: 1 = smoother replay but more memory; 2 is a good compromise.
+record:
+  duration-seconds: 10
+  interval-ticks: 2
+  # How far from the player other players, mobs and arrows are recorded (in blocks)
+  radius: 24
+  # Maximum entities per snapshot (including the victim)
+  max-entities: 20
+
+storage:
+  # How many replays are kept (oldest are deleted first)
+  max-replays: 50
+  # Replays older than this many days are deleted on startup
+  keep-days: 14
+
+# Send staff with the deathreplay.use permission a clickable [▶ Play] message on every death
+notify-staff: true
