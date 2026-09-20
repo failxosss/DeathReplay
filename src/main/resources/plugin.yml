@@ -1,5 +1,5 @@
 name: DeathReplay
-version: ${project.version}
+version: 1.0.0
 main: cz.deathreplay.DeathReplayPlugin
 api-version: '1.21'
 description: Records the last seconds before a player dies and lets admins replay them.
@@ -7,10 +7,13 @@ author: Failxos
 commands:
   replay:
     description: Replay a player's death
-    usage: /replay [list|play <id>|pause|speed <x>|seek <s>|cam <victim|killer|free>|restart|stop|delete <id>]
+    usage: /replay [list|play <id>|pause|speed <x>|seek <s>|cam <victim|killer|free>|restart|stop|delete <id>|reload]
     aliases: [dreplay]
     permission: deathreplay.use
 permissions:
   deathreplay.use:
     description: Allows playing death replays and receiving death notifications
+    default: op
+  deathreplay.reload:
+    description: Allows reloading the whole DeathReplay plugin with /replay reload
     default: op
