@@ -1,6 +1,11 @@
 package cz.deathreplay;
 
-import cz.deathreplay.Model.Replay;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
@@ -13,13 +18,12 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
-
 public final class ReplayCommand implements CommandExecutor, TabCompleter {
     private static final List<String> SUBS =
-            List.of("list", "play", "pause", "speed", "seek", "cam", "restart", "stop", "delete");
+            List.of("list", "play", "pause", "speed", "seek", "cam", "restart", "stop", "delete", "reload");
+    // Time of death shown in /replay list (server time zone). Use ZoneId.of("Europe/Prague") to force one.
+    private static final DateTimeFormatter TIME =
+            DateTimeFormatter.ofPattern("dd.MM. HH:mm:ss").withZone(ZoneId.systemDefault());
 
     private final DeathReplayPlugin plugin;
     private final ReplayStore store;
@@ -31,7 +35,6 @@ public final class ReplayCommand implements CommandExecutor, TabCompleter {
 
     @Override
     public boolean onCommand(CommandSender sender, Command cmd, String label, String[] args) {
-        // The permission is checked here as well, not only in plugin.yml. Only OPs / deathreplay.use may play replays.
         if (!sender.hasPermission(DeathReplayPlugin.PERM)) {
             msg(sender, "You don't have permission to use death replays.", NamedTextColor.RED);
             return true;
@@ -41,29 +44,36 @@ public final class ReplayCommand implements CommandExecutor, TabCompleter {
             case "list" -> list(sender, args.length > 1 ? args[1] : null);
             case "play" -> play(sender, args);
             case "delete" -> delete(sender, args);
+            case "reload" -> reload(sender);
             case "pause", "speed", "seek", "cam", "restart", "stop" -> control(sender, sub, args);
             default -> help(sender);
         }
         return true;
     }
 
-    // ---------------------------------------------------------------- subcommands
+    private void reload(CommandSender sender) {
+        if (!sender.hasPermission("deathreplay.reload")) {
+            msg(sender, "You don't have permission to reload DeathReplay.", NamedTextColor.RED);
+            return;
+        }
+        plugin.reload();
+        msg(sender, "DeathReplay reloaded (config + " + plugin.replayCount() + " saved replays).", NamedTextColor.GREEN);
+    }
 
     private void list(CommandSender sender, String victim) {
-        List<Replay> list = store.recent(8, victim);
+        List<Model.Replay> list = store.recent(8, victim);
         if (list.isEmpty()) {
             msg(sender, "No saved replays.", NamedTextColor.GRAY);
             return;
         }
         msg(sender, "Recent deaths:", NamedTextColor.GOLD);
-        for (Replay r : list) {
-            Component line = Component.text("#" + r.id() + " ", NamedTextColor.YELLOW)
-                    .append(Component.text(r.victimName(), NamedTextColor.WHITE))
-                    .append(Component.text(" ← " + r.killerName() + " ", NamedTextColor.GRAY))
-                    .append(Component.text("(" + ago(r.time()) + ", " + String.format(Locale.ROOT, "%.0f", r.seconds()) + " s) ",
-                            NamedTextColor.DARK_GRAY));
+        for (Model.Replay r : list) {
+            Component line = Component.text(r.victimName(), NamedTextColor.YELLOW)
+                    .append(Component.text(" \u2190 " + r.killerName() + " ", NamedTextColor.GRAY))
+                    .append(Component.text("[" + TIME.format(Instant.ofEpochMilli(r.time())) + ", "
+                            + ago(r.time()) + "] ", NamedTextColor.DARK_GRAY));
             if (sender instanceof Player) {
-                line = line.append(Component.text("[▶]", NamedTextColor.GREEN)
+                line = line.append(Component.text("[\u25b6]", NamedTextColor.GREEN)
                         .clickEvent(ClickEvent.runCommand("/replay play " + r.id()))
                         .hoverEvent(HoverEvent.showText(Component.text("Play replay #" + r.id()))));
             }
@@ -81,7 +91,7 @@ public final class ReplayCommand implements CommandExecutor, TabCompleter {
             msg(sender, "Usage: /replay play <id>   (find the id with /replay list)", NamedTextColor.RED);
             return;
         }
-        Replay r = store.get(id);
+        Model.Replay r = store.get(id);
         if (r == null) {
             msg(sender, "Replay #" + id + " does not exist.", NamedTextColor.RED);
             return;
@@ -156,11 +166,9 @@ public final class ReplayCommand implements CommandExecutor, TabCompleter {
     }
 
     private void help(CommandSender sender) {
-        msg(sender, "/replay list [player] | play <id> | pause | speed <x> | seek <s> | cam <victim|killer|free> | restart | stop | delete <id>",
+        msg(sender, "/replay list [player] | play <id> | pause | speed <x> | seek <s> | cam <victim|killer|free> | restart | stop | delete <id> | reload",
                 NamedTextColor.GRAY);
     }
-
-    // ---------------------------------------------------------------- tab completion
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command cmd, String alias, String[] args) {
@@ -180,14 +188,14 @@ public final class ReplayCommand implements CommandExecutor, TabCompleter {
                     return match(List.of("-5", "-2", "2", "5"), args[1]);
                 case "play":
                 case "delete": {
-                    List<String> ids = new ArrayList<>();
-                    for (Replay r : store.recent(10, null)) {
+                    ArrayList<String> ids = new ArrayList<>();
+                    for (Model.Replay r : store.recent(10, null)) {
                         ids.add(String.valueOf(r.id()));
                     }
                     return match(ids, args[1]);
                 }
                 case "list": {
-                    List<String> names = new ArrayList<>();
+                    ArrayList<String> names = new ArrayList<>();
                     for (Player p : Bukkit.getOnlinePlayers()) {
                         names.add(p.getName());
                     }
@@ -200,11 +208,9 @@ public final class ReplayCommand implements CommandExecutor, TabCompleter {
         return List.of();
     }
 
-    // ---------------------------------------------------------------- helpers
-
     private static List<String> match(List<String> options, String prefix) {
         String p = prefix.toLowerCase(Locale.ROOT);
-        List<String> out = new ArrayList<>();
+        ArrayList<String> out = new ArrayList<>();
         for (String o : options) {
             if (o.toLowerCase(Locale.ROOT).startsWith(p)) {
                 out.add(o);
@@ -234,10 +240,16 @@ public final class ReplayCommand implements CommandExecutor, TabCompleter {
     }
 
     private static String ago(long time) {
-        long sec = Math.max(0, (System.currentTimeMillis() - time) / 1000);
-        if (sec < 60) return sec + " s ago";
-        if (sec < 3600) return sec / 60 + " min ago";
-        if (sec < 86400) return sec / 3600 + " h ago";
-        return sec / 86400 + " d ago";
+        long sec = Math.max(0L, (System.currentTimeMillis() - time) / 1000L);
+        if (sec < 60L) {
+            return sec + " s ago";
+        }
+        if (sec < 3600L) {
+            return sec / 60L + " min ago";
+        }
+        if (sec < 86400L) {
+            return sec / 3600L + " h ago";
+        }
+        return sec / 86400L + " d ago";
     }
 }
