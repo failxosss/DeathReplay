@@ -14,5 +14,19 @@ storage:
   # Replays older than this many days are deleted on startup
   keep-days: 14
 
+replay:
+  # Camera used when a replay starts: victim | killer | spectator
+  #   victim    = view from the player who died
+  #   killer    = view from whoever killed them (falls back to victim if there was no killer)
+  #   spectator = free spectator camera
+  # The killer camera only works if the killer was recorded (within record.radius).
+  default-camera: victim
+
+display:
+  # Show health (in hearts) above replayed players
+  show-health: true
+  # Show armor points next to the health
+  show-armor: true
+
 # Send staff with the deathreplay.use permission a clickable [▶ Play] message on every death
 notify-staff: true
